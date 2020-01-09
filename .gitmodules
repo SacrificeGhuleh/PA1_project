@@ -1,0 +1,3 @@
+[submodule "IGSE"]
+	path = libs/IGSE
+	url = https://github.com/SacrificeGhuleh/IGSE.git
