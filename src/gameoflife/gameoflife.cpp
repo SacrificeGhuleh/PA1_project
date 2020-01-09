@@ -37,10 +37,11 @@ void GameOfLife::producer() {
     for (int row = 0; row < originalImage_->rows; row++) {
       for (int col = 0; col < originalImage_->cols; col++) {
         Pixel<3> &pix = originalImage_->at(row, col);
+        uint8_t randomValue = rand() % 255;
         
-        pix.r = rand() % 255;
-        pix.g = rand() % 255;
-        pix.b = rand() % 255;
+        pix.r = randomValue;
+        pix.g = randomValue;
+        pix.b = randomValue;
       }
     }
   }
