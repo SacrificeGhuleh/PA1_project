@@ -20,7 +20,9 @@ std::mt19937_64 engine(
     static_cast<uint64_t> (std::chrono::system_clock::to_time_t(std::chrono::system_clock::now())));
 std::uniform_real_distribution<double> rngDistribution(0.0, 1.0);
 
-int GameOfLife::computeThreads_ = std::thread::hardware_concurrency();
+int GameOfLife::computeThreads_ = std::thread::hardware_concurrency() * 4;
+
+#define MULTITHREAD 1
 
 void GameOfLife::ui() {
   static float imgScale = 1.f;
@@ -50,13 +52,40 @@ void GameOfLife::initTextures() {
   renderImage_ = std::make_unique<GpuImage<SIMULATION_HEIGHT, SIMULATION_WIDTH, CHANNELS>>("Game Of Life Render");
   modelImage_ = std::make_unique<GpuImage<SIMULATION_HEIGHT, SIMULATION_WIDTH, CHANNELS>>("Game Of Life Render");
   
-  for (int row = 0; row < renderImage_->rows; row++) {
-    for (int col = 0; col < renderImage_->cols; col++) {
+  const unsigned int cols = renderImage_->cols;
+  const unsigned int rows = renderImage_->cols;
+  
+  
+  #if MULTITHREAD
+    #pragma omp parallel for default(none) num_threads(computeThreads_) shared(modelImage_, renderImage_, precomputedOffsets_, DEAD, ALIVE, cols, rows, rngDistribution, engine)
+  #endif
+  for (int row = 0; row < rows; row++) {
+    for (int col = 0; col < cols; col++) {
+      float randomNumber = 0.f; //implicitly OMP private
+      
       if (row == 0 || col == 0 || row == renderImage_->rows - 1 || col == renderImage_->cols - 1) {
         modelImage_->at(row, col) = DEAD;
         renderImage_->at(row, col) = DEAD;
       } else {
-        if (rngDistribution(engine) > 0.5) {
+        PrecomputeData precomputeData;
+        
+        precomputeData.firstIdx = idx2dTo1d(row - 1, col - 1, cols) * renderImage_->channels;
+        precomputeData.secondIdx = idx2dTo1d(row, col - 1, cols) * renderImage_->channels;
+        precomputeData.thirdIdx = idx2dTo1d(row + 1, col - 1, cols) * renderImage_->channels;
+        precomputeData.centerIndex = idx2dTo1d(row, col, cols);
+        
+        #ifndef NDEBUG
+        precomputedOffsets_.at(col).at(row) = precomputeData;
+        #else
+        precomputedOffsets_[col][row] = precomputeData;
+        #endif
+        
+        #pragma omp critical
+        {
+          randomNumber = rngDistribution(engine);
+        }
+        
+        if (randomNumber > 0.5) {
           modelImage_->at(row, col) = ALIVE;
           renderImage_->at(row, col) = ALIVE;
         } else {
@@ -78,7 +107,6 @@ void GameOfLife::render() {
   producer_thread.join();
 }
 
-
 void GameOfLife::computePartOfTheGameBoardIndexed(int fromIndex, int toIndex) {
   for (int idx = fromIndex; idx < toIndex - 1; idx++) {
     int col = idx % renderImage_->cols;
@@ -86,7 +114,6 @@ void GameOfLife::computePartOfTheGameBoardIndexed(int fromIndex, int toIndex) {
     simulate(row, col);
   }
 }
-
 
 void GameOfLife::computePartOfTheGameBoard(int fromRow, int toRow, int fromCol, int toCol) {
   for (int row = fromRow; row < toRow - 1; row++) {
@@ -107,8 +134,9 @@ void GameOfLife::producer() {
 //    t += dt.count();
     t += producerTime;
     t0 = t1;
-    
-    #pragma omp parallel for num_threads(computeThreads_) shared(modelImage_, renderImage_)
+    #if MULTITHREAD
+      #pragma omp parallel for default(none) num_threads(computeThreads_)  shared(modelImage_, renderImage_, precomputedOffsets_)
+    #endif
     for (int row = 1; row < modelImage_->rows - 1; row++) {
       for (int col = 1; col < modelImage_->cols - 1; col++) {
         simulate(row, col);
@@ -126,42 +154,53 @@ void GameOfLife::producer() {
   std::cout << "Producer thread stop\n";
 }
 
-template<int T_CHANNELS>
-struct PackOfThreePixels {
-  Pixel<T_CHANNELS> first;
-  Pixel<T_CHANNELS> second;
-  Pixel<T_CHANNELS> third;
-};
 
 void GameOfLife::simulate(int row, int col) {
+  #ifndef NDEBUG
+  const PrecomputeData precomputeData = precomputedOffsets_.at(row).at(col);
+  #else
+  const PrecomputeData precomputeData = precomputedOffsets_[row][col];
+  #endif
   
   
-  Pixel<3> pix = modelImage_->at(row, col);
+  PackOfThreePixels<3> firstRow = reinterpret_cast<PackOfThreePixels<3> &>(renderImage_->atRaw(
+      precomputeData.firstIdx));
+  PackOfThreePixels<3> secondRow = reinterpret_cast<PackOfThreePixels<3> &>(renderImage_->atRaw(
+      precomputeData.secondIdx));
+  PackOfThreePixels<3> thirdRow = reinterpret_cast<PackOfThreePixels<3> &>(renderImage_->atRaw(
+      precomputeData.thirdIdx));
   
-  
-  int aliveNeighbors = 0;
-  aliveNeighbors = renderImage_->at(row - 1, col - 1).r +
-                   renderImage_->at(row - 1, col).r +
-                   renderImage_->at(row - 1, col + 1).r +
-                   renderImage_->at(row, col - 1).r +
-                   renderImage_->at(row, col + 1).r +
-                   renderImage_->at(row + 1, col - 1).r +
-                   renderImage_->at(row + 1, col).r +
-                   renderImage_->at(row + 1, col + 1).r;
+  int aliveNeighbors = firstRow.first.r +
+                       firstRow.second.r +
+                       firstRow.third.r +
+                       secondRow.first.r +
+                       secondRow.third.r +
+                       thirdRow.first.r +
+                       thirdRow.second.r +
+                       thirdRow.third.r;
   aliveNeighbors /= ALIVE.r;
   
-  if (pix.r == DEAD.r) {
+  if (secondRow.second.r == DEAD.r) {
     if (aliveNeighbors == 3) {
-      pix = ALIVE;
+      secondRow.second = ALIVE;
     }
   } else {
     if (aliveNeighbors < 2 || aliveNeighbors > 3) {
-      pix = DEAD;
+      secondRow.second = DEAD;
     }
     
     if (aliveNeighbors == 2 || aliveNeighbors == 3) {
-      pix = ALIVE;
+      secondRow.second = ALIVE;
     }
   }
-  modelImage_->at(row, col) = pix;
+  modelImage_->at(precomputeData.centerIndex) = secondRow.second;
+}
+
+GameOfLife::GameOfLife() : Gui("Game of life") {
+  for (int row = 0; row < SIMULATION_HEIGHT; row++) {
+    precomputedOffsets_.emplace_back(std::vector<PrecomputeData>());
+    for (int col = 0; col < SIMULATION_WIDTH; col++) {
+      precomputedOffsets_[row].emplace_back(); //Just allocate, insert empty
+    }
+  }
 }
