@@ -33,10 +33,14 @@ protected:
   
   virtual void producer();
   
+private:
+  
+  static int computeThreads_;
+  
   void computePartOfTheGameBoard(int fromRow, int toRow, int fromCol, int toCol);
   void computePartOfTheGameBoardIndexed(int fromIndex, int toIndex);
-
-private:
+  
+  virtual void simulate(int row, int col);
   std::mutex tex_data_lock_;
   
   std::atomic<bool> finish_request_{false};

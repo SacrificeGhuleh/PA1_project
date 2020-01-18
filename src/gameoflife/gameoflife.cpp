@@ -5,6 +5,7 @@
 #include <thread>
 #include <random>
 #include <iostream>
+#include <future>
 #include "gameoflife.h"
 
 
@@ -19,11 +20,17 @@ std::mt19937_64 engine(
     static_cast<uint64_t> (std::chrono::system_clock::to_time_t(std::chrono::system_clock::now())));
 std::uniform_real_distribution<double> rngDistribution(0.0, 1.0);
 
+int GameOfLife::computeThreads_ = std::thread::hardware_concurrency();
+
 void GameOfLife::ui() {
   static float imgScale = 1.f;
   {
     ImGui::Begin("Info & Control");
     ImGui::SliderFloat("Image scale", &imgScale, 0.2f, 10.0f);
+    ImGui::SliderInt("Compute threads", &computeThreads_, 1, 20);
+    
+    ImGui::Separator();
+    
     ImGui::Text("Rendering average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate,
                 ImGui::GetIO().Framerate);
     ImGui::Text("Computing time %.3f ms/frame (%.1f FPS)", producerTime * 1000.f,
@@ -74,36 +81,9 @@ void GameOfLife::render() {
 
 void GameOfLife::computePartOfTheGameBoardIndexed(int fromIndex, int toIndex) {
   for (int idx = fromIndex; idx < toIndex - 1; idx++) {
-    unsigned int col = idx % renderImage_->size;
-    unsigned int row = idx / renderImage_->size;
-    
-    Pixel<3> pix = modelImage_->at(row, col);
-    
-    int aliveNeighbors = 0;
-    aliveNeighbors = renderImage_->at(row - 1, col - 1).r +
-                     renderImage_->at(row - 1, col).r +
-                     renderImage_->at(row - 1, col + 1).r +
-                     renderImage_->at(row, col - 1).r +
-                     renderImage_->at(row, col + 1).r +
-                     renderImage_->at(row + 1, col - 1).r +
-                     renderImage_->at(row + 1, col).r +
-                     renderImage_->at(row + 1, col + 1).r;
-    aliveNeighbors /= ALIVE.r;
-    
-    if (pix.r == DEAD.r) {
-      if (aliveNeighbors == 3) {
-        pix = ALIVE;
-      }
-    } else {
-      if (aliveNeighbors < 2 || aliveNeighbors > 3) {
-        pix = DEAD;
-      }
-      
-      if (aliveNeighbors == 2 || aliveNeighbors == 3) {
-        pix = ALIVE;
-      }
-    }
-    modelImage_->at(row, col) = pix;
+    int col = idx % renderImage_->cols;
+    int row = idx / renderImage_->cols;
+    simulate(row, col);
   }
 }
 
@@ -111,33 +91,7 @@ void GameOfLife::computePartOfTheGameBoardIndexed(int fromIndex, int toIndex) {
 void GameOfLife::computePartOfTheGameBoard(int fromRow, int toRow, int fromCol, int toCol) {
   for (int row = fromRow; row < toRow - 1; row++) {
     for (int col = fromCol; col < toCol - 1; col++) {
-      Pixel<3> pix = modelImage_->at(row, col);
-      
-      int aliveNeighbors = 0;
-      aliveNeighbors = renderImage_->at(row - 1, col - 1).r +
-                       renderImage_->at(row - 1, col).r +
-                       renderImage_->at(row - 1, col + 1).r +
-                       renderImage_->at(row, col - 1).r +
-                       renderImage_->at(row, col + 1).r +
-                       renderImage_->at(row + 1, col - 1).r +
-                       renderImage_->at(row + 1, col).r +
-                       renderImage_->at(row + 1, col + 1).r;
-      aliveNeighbors /= ALIVE.r;
-      
-      if (pix.r == DEAD.r) {
-        if (aliveNeighbors == 3) {
-          pix = ALIVE;
-        }
-      } else {
-        if (aliveNeighbors < 2 || aliveNeighbors > 3) {
-          pix = DEAD;
-        }
-        
-        if (aliveNeighbors == 2 || aliveNeighbors == 3) {
-          pix = ALIVE;
-        }
-      }
-      modelImage_->at(row, col) = pix;
+      simulate(row, col);
     }
   }
 }
@@ -145,13 +99,6 @@ void GameOfLife::computePartOfTheGameBoard(int fromRow, int toRow, int fromCol, 
 void GameOfLife::producer() {
   float t = 0.0f; // time
   auto t0 = std::chrono::high_resolution_clock::now();
-  
-  //One thread is GUI thread
-  const unsigned int numberOfThreads = std::thread::hardware_concurrency() - 1;
-  
-//  std::vector<std::thread> computeThreads;
-  
-  std::thread computeThreads[4];
   
   while (!finish_request_.load(std::memory_order_acquire)) {
     auto t1 = std::chrono::high_resolution_clock::now();
@@ -161,35 +108,60 @@ void GameOfLife::producer() {
     t += producerTime;
     t0 = t1;
     
-    assert(originalImage_ != nullptr);
+    #pragma omp parallel for num_threads(computeThreads_) shared(modelImage_, renderImage_)
+    for (int row = 1; row < modelImage_->rows - 1; row++) {
+      for (int col = 1; col < modelImage_->cols - 1; col++) {
+        simulate(row, col);
+      }
+    }
+    
     {
       //Lock image for swap
       std::lock_guard<std::mutex> lock(tex_data_lock_);
       //Swap buffers
       std::swap(modelImage_, renderImage_);
     }
-    
-    
-    computeThreads[0] = std::thread(&GameOfLife::computePartOfTheGameBoard, this,
-                                    1, renderImage_->rows / 2,
-                                    1, renderImage_->cols / 2);
-    computeThreads[1] = std::thread(&GameOfLife::computePartOfTheGameBoard, this,
-                                    renderImage_->rows / 2, renderImage_->rows,
-                                    1, renderImage_->cols / 2);
-    
-    computeThreads[2] = std::thread(&GameOfLife::computePartOfTheGameBoard, this,
-                                    1, renderImage_->rows / 2,
-                                    renderImage_->cols / 2, renderImage_->cols);
-    computeThreads[3] = std::thread(&GameOfLife::computePartOfTheGameBoard, this,
-                                    renderImage_->rows / 2,
-                                    renderImage_->rows, renderImage_->cols / 2, renderImage_->cols);
-    
-    computePartOfTheGameBoard(1, renderImage_->rows, 1, renderImage_->cols);
-    
   }
   
-  for (std::thread &thread : computeThreads) {
-    thread.join();
-  }
   std::cout << "Producer thread stop\n";
+}
+
+template<int T_CHANNELS>
+struct PackOfThreePixels {
+  Pixel<T_CHANNELS> first;
+  Pixel<T_CHANNELS> second;
+  Pixel<T_CHANNELS> third;
+};
+
+void GameOfLife::simulate(int row, int col) {
+  
+  
+  Pixel<3> pix = modelImage_->at(row, col);
+  
+  
+  int aliveNeighbors = 0;
+  aliveNeighbors = renderImage_->at(row - 1, col - 1).r +
+                   renderImage_->at(row - 1, col).r +
+                   renderImage_->at(row - 1, col + 1).r +
+                   renderImage_->at(row, col - 1).r +
+                   renderImage_->at(row, col + 1).r +
+                   renderImage_->at(row + 1, col - 1).r +
+                   renderImage_->at(row + 1, col).r +
+                   renderImage_->at(row + 1, col + 1).r;
+  aliveNeighbors /= ALIVE.r;
+  
+  if (pix.r == DEAD.r) {
+    if (aliveNeighbors == 3) {
+      pix = ALIVE;
+    }
+  } else {
+    if (aliveNeighbors < 2 || aliveNeighbors > 3) {
+      pix = DEAD;
+    }
+    
+    if (aliveNeighbors == 2 || aliveNeighbors == 3) {
+      pix = ALIVE;
+    }
+  }
+  modelImage_->at(row, col) = pix;
 }

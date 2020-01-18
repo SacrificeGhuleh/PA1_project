@@ -17,9 +17,6 @@ int main(int, char **) {
   testMats();
 #endif //NDEBUG
   
-  unsigned int n = std::thread::hardware_concurrency();
-  std::cout << n << " concurrent threads are supported.\n";
-  
   GameOfLife gui;
   
   gui.render();
