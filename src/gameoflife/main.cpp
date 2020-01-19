@@ -1,11 +1,8 @@
-// dear imgui - standalone example application for OpenGL
-// If you are new to dear imgui, see examples/README.txt and documentation at the top of imgui.cpp.
-
 #include "gameoflife.h"
-#include <thread>
-#include <iostream>
+#include <omp.h>
 
 #ifndef NDEBUG
+
 #include <iostream>
 #include <mat.h>
 
@@ -15,7 +12,11 @@
 int main(int, char **) {
 #ifndef NDEBUG
   testMats();
+  
+  std::cout << "Available threads : " << omp_get_max_threads() << "\n";
+
 #endif //NDEBUG
+  
   
   GameOfLife gui;
   

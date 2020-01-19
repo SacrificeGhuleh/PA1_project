@@ -6,21 +6,24 @@
 #include <random>
 #include <iostream>
 #include <future>
+
+#include <omp.h>
 #include "gameoflife.h"
 
 
 using namespace std::chrono_literals;
 
+
 static Pixel<3> DEAD = {0, 0, 0};
 static Pixel<3> ALIVE = {255, 255, 255};
 
-static float producerTime;
-
 std::mt19937_64 engine(
     static_cast<uint64_t> (std::chrono::system_clock::to_time_t(std::chrono::system_clock::now())));
+
 std::uniform_real_distribution<double> rngDistribution(0.0, 1.0);
 
-int GameOfLife::computeThreads_ = std::thread::hardware_concurrency() * 4;
+int GameOfLife::computeThreads_ = omp_get_max_threads() - 1; //1 thread is used for gui
+float GameOfLife::producerTime_ = 0.f;
 
 #define MULTITHREAD 1
 
@@ -29,14 +32,28 @@ void GameOfLife::ui() {
   {
     ImGui::Begin("Info & Control");
     ImGui::SliderFloat("Image scale", &imgScale, 0.2f, 10.0f);
-    ImGui::SliderInt("Compute threads", &computeThreads_, 1, 20);
+    
+    static bool experimentalThreads = false;
+    ImGui::Checkbox("Unlimited threads", &experimentalThreads);
+    
+    if (experimentalThreads) {
+      ImGui::Text("Unlimited threads, only for experiments");
+      ImGui::SliderInt("Compute threads", &computeThreads_, 1, omp_get_max_threads() * omp_get_max_threads());
+    } else {
+      ImGui::SliderInt("Compute threads", &computeThreads_, 1, omp_get_max_threads());
+    }
     
     ImGui::Separator();
     
     ImGui::Text("Rendering average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate,
                 ImGui::GetIO().Framerate);
-    ImGui::Text("Computing time %.3f ms/frame (%.1f FPS)", producerTime * 1000.f,
-                1000.f / (producerTime * 1000.f));
+    ImGui::Text("Computing time %.3f ms/generation (%.1f Generations/s)", producerTime_ * 1000.f,
+                1000.f / (producerTime_ * 1000.f));
+    ImGui::Separator();
+    
+    ImGui::Text(" Generation: %d", generation_);
+    ImGui::Text(" Alive cells: %d", aliveCount_);
+    ImGui::Text(" Dead cells: %d", deadCount_);
     ImGui::End();
   }
   
@@ -55,13 +72,11 @@ void GameOfLife::initTextures() {
   const unsigned int cols = renderImage_->cols;
   const unsigned int rows = renderImage_->cols;
   
-  
   #if MULTITHREAD
     #pragma omp parallel for default(none) num_threads(computeThreads_) shared(modelImage_, renderImage_, precomputedOffsets_, DEAD, ALIVE, cols, rows, rngDistribution, engine)
   #endif
   for (int row = 0; row < rows; row++) {
     for (int col = 0; col < cols; col++) {
-      float randomNumber = 0.f; //implicitly OMP private
       
       if (row == 0 || col == 0 || row == renderImage_->rows - 1 || col == renderImage_->cols - 1) {
         modelImage_->at(row, col) = DEAD;
@@ -80,8 +95,9 @@ void GameOfLife::initTextures() {
         precomputedOffsets_[col][row] = precomputeData;
         #endif
         
-        #pragma omp critical
+        float randomNumber = 0.f; //implicitly OMP private
         {
+          #pragma omp critical
           randomNumber = rngDistribution(engine);
         }
         
@@ -107,22 +123,6 @@ void GameOfLife::render() {
   producer_thread.join();
 }
 
-void GameOfLife::computePartOfTheGameBoardIndexed(int fromIndex, int toIndex) {
-  for (int idx = fromIndex; idx < toIndex - 1; idx++) {
-    int col = idx % renderImage_->cols;
-    int row = idx / renderImage_->cols;
-    simulate(row, col);
-  }
-}
-
-void GameOfLife::computePartOfTheGameBoard(int fromRow, int toRow, int fromCol, int toCol) {
-  for (int row = fromRow; row < toRow - 1; row++) {
-    for (int col = fromCol; col < toCol - 1; col++) {
-      simulate(row, col);
-    }
-  }
-}
-
 void GameOfLife::producer() {
   float t = 0.0f; // time
   auto t0 = std::chrono::high_resolution_clock::now();
@@ -130,10 +130,14 @@ void GameOfLife::producer() {
   while (!finish_request_.load(std::memory_order_acquire)) {
     auto t1 = std::chrono::high_resolution_clock::now();
     std::chrono::duration<float> dt = t1 - t0;
-    producerTime = dt.count();
+    producerTime_ = dt.count();
 //    t += dt.count();
-    t += producerTime;
+    t += producerTime_;
     t0 = t1;
+    
+    simulateAlive_ = 0;
+    simulateDead_ = 0;
+    
     #if MULTITHREAD
       #pragma omp parallel for default(none) num_threads(computeThreads_)  shared(modelImage_, renderImage_, precomputedOffsets_)
     #endif
@@ -148,12 +152,15 @@ void GameOfLife::producer() {
       std::lock_guard<std::mutex> lock(tex_data_lock_);
       //Swap buffers
       std::swap(modelImage_, renderImage_);
+      generation_++;
+      
+      aliveCount_ = simulateAlive_;
+      deadCount_ = simulateDead_;
     }
   }
   
   std::cout << "Producer thread stop\n";
 }
-
 
 void GameOfLife::simulate(int row, int col) {
   #ifndef NDEBUG
@@ -170,33 +177,42 @@ void GameOfLife::simulate(int row, int col) {
   PackOfThreePixels<3> thirdRow = reinterpret_cast<PackOfThreePixels<3> &>(renderImage_->atRaw(
       precomputeData.thirdIdx));
   
-  int aliveNeighbors = firstRow.first.r +
-                       firstRow.second.r +
-                       firstRow.third.r +
-                       secondRow.first.r +
-                       secondRow.third.r +
-                       thirdRow.first.r +
-                       thirdRow.second.r +
-                       thirdRow.third.r;
+  int aliveNeighbors = 0;
+  aliveNeighbors = firstRow.first.r +
+                   firstRow.second.r +
+                   firstRow.third.r +
+                   secondRow.first.r +
+                   secondRow.third.r +
+                   thirdRow.first.r +
+                   thirdRow.second.r +
+                   thirdRow.third.r;
   aliveNeighbors /= ALIVE.r;
   
   if (secondRow.second.r == DEAD.r) {
     if (aliveNeighbors == 3) {
+      simulateAlive_++;
       secondRow.second = ALIVE;
     }
   } else {
     if (aliveNeighbors < 2 || aliveNeighbors > 3) {
+      simulateDead_++;
       secondRow.second = DEAD;
     }
     
     if (aliveNeighbors == 2 || aliveNeighbors == 3) {
+      simulateAlive_++;
       secondRow.second = ALIVE;
     }
   }
   modelImage_->at(precomputeData.centerIndex) = secondRow.second;
 }
 
-GameOfLife::GameOfLife() : Gui("Game of life") {
+GameOfLife::GameOfLife() :
+    Gui("Game of life"),
+    generation_{0},
+    aliveCount_{0},
+    deadCount_{0} {
+  //allocate precompute data. Fill in initTextures
   for (int row = 0; row < SIMULATION_HEIGHT; row++) {
     precomputedOffsets_.emplace_back(std::vector<PrecomputeData>());
     for (int col = 0; col < SIMULATION_WIDTH; col++) {

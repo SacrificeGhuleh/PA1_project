@@ -14,11 +14,11 @@
 #include <gui.h>
 #include <gpuimage.h>
 
-#define SIMULATION_WIDTH  4096
-#define SIMULATION_HEIGHT 4096
+#define SIMULATION_WIDTH  2048
+#define SIMULATION_HEIGHT 2048
 #define CHANNELS 3
 
-struct PrecomputeData{
+struct PrecomputeData {
   unsigned int firstIdx;
   unsigned int secondIdx;
   unsigned int thirdIdx;
@@ -47,23 +47,25 @@ protected:
   virtual void initTextures() override;
   
   virtual void producer();
-  
+
 private:
-  
+  static float producerTime_;
   static int computeThreads_;
-  
-  void computePartOfTheGameBoard(int fromRow, int toRow, int fromCol, int toCol);
-  void computePartOfTheGameBoardIndexed(int fromIndex, int toIndex);
-  
-  virtual void simulate(int row, int col);
   std::mutex tex_data_lock_;
-  
   std::atomic<bool> finish_request_{false};
+  
+  unsigned int generation_;
+  unsigned int aliveCount_;
+  unsigned int deadCount_;
+  
+  unsigned int simulateAlive_;
+  unsigned int simulateDead_;
   
   std::unique_ptr<GpuImage<SIMULATION_HEIGHT, SIMULATION_WIDTH, CHANNELS>> renderImage_;
   std::unique_ptr<GpuImage<SIMULATION_HEIGHT, SIMULATION_WIDTH, CHANNELS>> modelImage_;
-  
   std::vector<std::vector<PrecomputeData>> precomputedOffsets_;
+  
+  virtual void simulate(int row, int col);
 };
 
 
